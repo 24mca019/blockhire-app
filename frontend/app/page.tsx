@@ -1,11 +1,12 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import Layout from "../components/Layout"
 import Link from "next/link"
 
 export default function HomePage() {
   const [currentSlide, setCurrentSlide] = useState(0)
+  const videoRef = useRef(null)
 
   const slides = [
     {
@@ -32,6 +33,15 @@ export default function HomePage() {
     }, 4000)
     return () => clearInterval(timer)
   }, [slides.length])
+
+  // ✅ Toggle play/pause on click
+  const handleVideoClick = () => {
+    if (videoRef.current.paused) {
+      videoRef.current.play()
+    } else {
+      videoRef.current.pause()
+    }
+  }
 
   return (
     <Layout>
@@ -136,23 +146,29 @@ export default function HomePage() {
           </div>
         </div>
 
+        {/* ✅ Updated "How It Works" Section */}
         <div className="card">
           <h2 style={{ textAlign: "center", marginBottom: "2rem" }}>How It Works</h2>
-          <div style={{ textAlign: "center" }}>
-            <div
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "center" }}>
+            <video
+              ref={videoRef}
+              onClick={handleVideoClick}
+              width="60%"
               style={{
-                background: "#f7fafc",
-                padding: "4rem",
+                cursor: "pointer",
                 borderRadius: "8px",
                 border: "2px dashed #e2e8f0",
               }}
+              controls
+              preload="none"
             >
-              <p>Video/Illustration Placeholder</p>
-              <p style={{ color: "#718096", marginTop: "1rem" }}>
-                Coming soon: Interactive verification process
-              </p>
-            </div>
+              <source src="/BLOCKHIRE_v2.mp4" type="video/mp4" />
+              Your browser does not support the video tag.
+            </video>
           </div>
+          <p style={{ textAlign: "center", color: "#666", marginTop: "1rem" }}>
+            Click the video to play or pause
+          </p>
         </div>
       </section>
     </Layout>

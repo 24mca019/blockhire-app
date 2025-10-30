@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Contract Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"
+    integrity="sha512-bLwLr3lzJN1cvtbClBMhKDyaD0uocWmphiqO8v0w3/z/XqUwzkM00gZq7BV3dQS9mQu0rarZMTsxlcnIHszElA=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // --- ⛓️ Web3 Constants ---
+        const contractAddress = "0xc9Dd39b2df5F2E1BbC4633c7Bc86D798837d2b4d";
+        const contractABI = [
+            {
+                "inputs": [
+                    { "internalType": "string", "name": "empId", "type": "string" },
+                    { "internalType": "string", "name": "userHash", "type": "string" },
+                    { "internalType": "string", "name": "email", "type": "string" },
+                    { "internalType": "string", "name": "originalDocHash", "type": "string" },
+                    { "internalType": "string", "name": "storagePath", "type": "string" }
+                ],
+                "name": "registerUser",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function"
+            }
+        ];
+        const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7"; // Hex for 11155111
+        const SEPOLIA_CHAIN_ID_NUM = 11155111;
+
+        // --- UI Components ---
+        const Button = ({ children, ...props }) => (
+            <button
+                {...props}
+                className="inline-flex items-center justify-center rounded-md bg-blue-600 px-6 py-3 text-lg font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+                {children}
+            </button>
+        );
+
+        const Alert = ({ children, variant }) => {
+            const baseClasses = "mt-4 rounded-md p-4 text-sm";
+            const variantClasses = {
+                success: "bg-green-100 text-green-800",
+                error: "bg-red-100 text-red-800",
+                info: "bg-blue-100 text-blue-800",
+            };
+            return <div className={`${baseClasses} ${variantClasses[variant]}`}>{children}</div>;
+        };
+
+        function DemoPage() {
+            const [signer, setSigner] = useState(null);
+            const [message, setMessage] = useState("");
+            const [txHash, setTxHash] = useState("");
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [error, setError] = useState("");
+            const [isLocalFile, setIsLocalFile] = useState(false);
+
+            // ✨ NEW: Check how the file is opened when the component loads
+            useEffect(() => {
+                if (window.location.protocol === 'file:') {
+                    setError(
+                        <>
+                            <strong>Cannot Connect Wallet.</strong>
+                            <p className="mt-2">This page was opened as a local file. For MetaMask to work, you must run it from a local web server.</p>
+                            <p className="mt-2 font-mono text-xs bg-gray-200 p-2 rounded">In your project folder, run: <br/> npx serve</p>
+                        </>
+                    );
+                    setIsLocalFile(true);
+                }
+            }, []);
+
+
+            const connectWallet = async () => {
+                if (!window.ethereum || !window.ethereum.isMetaMask) {
+                    setError("MetaMask is not installed. Please install the extension to continue.");
+                    return;
+                }
+
+                try {
+                    setMessage("Connecting to wallet...");
+                    const provider = new window.ethers.BrowserProvider(window.ethereum);
+                    
+                    const network = await provider.getNetwork();
+                    if (network.chainId !== BigInt(SEPOLIA_CHAIN_ID_NUM)) {
+                        setError("Wrong network. Please switch to the Sepolia testnet.");
+                        try {
+                            await window.ethereum.request({
+                                method: 'wallet_switchEthereumChain',
+                                params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+                            });
+                        } catch (switchError) {
+                            if (switchError.code === 4902) {
+                               setError("Sepolia network not found in MetaMask. Please add it manually.");
+                            } else {
+                               setError("Failed to switch network. Please do it manually in MetaMask.");
+                            }
+                            return;
+                        }
+                        return;
+                    }
+                    
+                    await provider.send("eth_requestAccounts", []);
+                    const currentSigner = await provider.getSigner();
+                    setSigner(currentSigner);
+                    const address = await currentSigner.getAddress();
+                    setMessage(`Connected as: ${address.substring(0, 6)}...${address.substring(address.length - 4)}`);
+                    setError("");
+
+                    window.ethereum.on('chainChanged', () => window.location.reload());
+                    
+                } catch (err) {
+                    console.error(err);
+                    setError(err.code === 4001 ? "Connection rejected by user." : "Failed to connect to MetaMask.");
+                }
+            };
+
+            const handleRegisterUser = async () => {
+                if (!signer) {
+                    setError("Wallet not connected. Please connect MetaMask.");
+                    return;
+                }
+                
+                setIsSubmitting(true);
+                setError("");
+                setTxHash("");
+                setMessage("Preparing transaction...");
+
+                try {
+                    const contract = new window.ethers.Contract(contractAddress, contractABI, signer);
+                    const uniqueId = `EMP-${Date.now()}`;
+                    const userHash = window.ethers.keccak256(window.ethers.toUtf8Bytes(uniqueId));
+                    const dummyData = {
+                        empId: uniqueId,
+                        userHash: userHash,
+                        email: `${uniqueId}@example.com`,
+                        originalDocHash: window.ethers.keccak256(window.ethers.toUtf8Bytes(`doc-${uniqueId}`)),
+                        storagePath: `path/to/${uniqueId}`
+                    };
+
+                    setMessage("Please confirm the transaction in MetaMask...");
+                    const tx = await contract.registerUser(
+                        dummyData.empId, dummyData.userHash, dummyData.email,
+                        dummyData.originalDocHash, dummyData.storagePath
+                    );
+                    
+                    setMessage(`Transaction sent! Waiting for confirmation...`);
+                    await tx.wait();
+
+                    setTxHash(tx.hash);
+                    setMessage("Transaction confirmed successfully!");
+
+                } catch (err) {
+                    console.error("Transaction Error:", err);
+                    if (err.code === 4001) {
+                        setError("Transaction rejected in MetaMask.");
+                    } else {
+                        setError(err.reason || "An error occurred during the transaction.");
+                    }
+                    setMessage("");
+                } finally {
+                    setIsSubmitting(false);
+                }
+            };
+
+            return (
+                <div className="flex min-h-screen items-center justify-center bg-gray-100 font-sans">
+                    <div className="w-full max-w-2xl rounded-lg bg-white p-8 shadow-lg text-center">
+                        <h1 className="text-3xl font-bold text-gray-800">Smart Contract Demo</h1>
+                        <p className="mt-2 text-gray-600">
+                            Test the `registerUser` function on your smart contract.
+                        </p>
+
+                        <div className="mt-6 border-t pt-6">
+                            {!signer ? (
+                                <Button onClick={connectWallet} disabled={isLocalFile}>
+                                    Connect Wallet
+                                </Button>
+                            ) : (
+                                <Button onClick={handleRegisterUser} disabled={isSubmitting || isLocalFile}>
+                                    {isSubmitting ? "Submitting..." : "Register Dummy User"}
+                                </Button>
+                            )}
+                        </div>
+                        
+                        <div className="mt-6 min-h-[100px] text-left">
+                            {message && <Alert variant="info">{message}</Alert>}
+                            {error && <Alert variant="error">{error}</Alert>}
+                            {txHash && (
+                                <Alert variant="success">
+                                    <strong>Success!</strong> Transaction Hash:
+                                    <p className="mt-2 break-all font-mono text-xs">
+                                        <a 
+                                            href={`https://sepolia.etherscan.io/tx/${txHash}`} 
+                                            target="_blank" 
+                                            rel="noopener noreferrer"
+                                            className="text-green-900 underline hover:opacity-80"
+                                        >
+                                            {txHash}
+                                        </a>
+                                    </p>
+                                </Alert>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<DemoPage />);
+    </script>
+</body>
+</html>

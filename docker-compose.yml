@@ -1,0 +1,33 @@
+# docker-compose.yml
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: blockhire-backend
+    container_name: blockhire-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the SQLite database file to make it persistent
+      - ./backend/db.sqlite3:/app/db.sqlite3
+      # Mount the media folder to make file uploads persistent
+      - ./backend/media:/app/media
+    env_file:
+      - ./backend/.env
+
+  frontend:
+    build:
+      context: ./frontend
+    image: blockhire-frontend
+    container_name: blockhire-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  sqlite_data:
+  media_data:

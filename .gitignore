@@ -46,3 +46,6 @@ frontend/test-*.html
 # Temporary files
 *.tmp
 *.temp
+
+frontend/public/BLOCKHIRE_V2.mp4
+frontend/public/BLOCKHIRE.mp4

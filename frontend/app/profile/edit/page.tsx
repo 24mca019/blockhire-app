@@ -18,9 +18,37 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
-import { CheckCircle, AlertCircle, Upload, FileText, Hash, Eye, EyeOff } from "lucide-react"
+import { CheckCircle, AlertCircle, Upload, FileText } from "lucide-react"
 import { validateFile } from "../../../lib/validation"
 import { MobileInput } from "@/components/ui/mobile-input"
+import { ethers, Eip1193Provider } from "ethers"
+
+// --- ⛓️ Web3 Constants ---
+const contractAddress = "0xc9Dd39b2df5F2E1BbC4633c7Bc86D798837d2b4d";
+const contractABI = [
+    {
+        "inputs": [
+            { "internalType": "string", "name": "empId", "type": "string" },
+            { "internalType": "string", "name": "userHash", "type": "string" },
+            { "internalType": "string", "name": "email", "type": "string" },
+            { "internalType": "string", "name": "originalDocHash", "type": "string" },
+            { "internalType": "string", "name": "storagePath", "type": "string" }
+        ],
+        "name": "registerUser",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    }
+];
+const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7"; // Hex for 11155111
+const SEPOLIA_CHAIN_ID_NUM = 11155111;
+
+// Extend window type to include ethereum
+declare global {
+    interface Window {
+        ethereum?: Eip1193Provider & { isMetaMask?: boolean };
+    }
+}
 
 // Validation schema
 const profileSchema = z.object({
@@ -30,230 +58,171 @@ const profileSchema = z.object({
   mobile: z.string()
     .min(10, "Mobile number must be at least 10 digits")
     .max(15, "Mobile number cannot exceed 15 digits")
-    .regex(/^[\+]?[1-9][\d]{9,14}$/, "Please enter a valid mobile number")
-    .refine((value) => {
-      const cleaned = value.replace(/[^\d+]/g, '')
-      if (cleaned.startsWith('+')) {
-        const digits = cleaned.substring(1)
-        return digits.length >= 10 && digits.length <= 15 && /^[1-9]/.test(digits)
-      } else {
-        return cleaned.length >= 10 && cleaned.length <= 15 && /^[1-9]/.test(cleaned)
-      }
-    }, "Mobile number format is invalid"),
+    .regex(/^[\+]?[1-9][\d]{9,14}$/, "Please enter a valid mobile number"),
   address: z.string().min(10, "Address must be at least 10 characters"),
   jobDesignation: z.string().min(2, "Job designation is required"),
   department: z.string().min(2, "Department is required"),
-})
+});
 
 export default function ProfileEditPage() {
-  const router = useRouter()
-  const { user, userProfile, credentials, refreshProfile } = useAuth()
-  const [step, setStep] = useState<"personal" | "contact" | "employment">("personal")
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [isHashing, setIsHashing] = useState(false)
-  const [txStatus, setTxStatus] = useState<string>("")
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null)
-  const [documentHistory, setDocumentHistory] = useState<DocumentRecord[]>([])
-
+  const router = useRouter();
+  const { user, userProfile, credentials, refreshProfile } = useAuth();
+  const [step, setStep] = useState<"personal" | "contact" | "employment">("personal");
+  const [isHashing, setIsHashing] = useState(false);
+  const [txStatus, setTxStatus] = useState<string>("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [documentHistory, setDocumentHistory] = useState<DocumentRecord[]>([]);
+  
   const form = useForm<ProfileFormData>({
     resolver: zodResolver(profileSchema),
+    mode: 'onBlur', // Validate on blur for better user experience
     defaultValues: {
-      firstName: "",
-      lastName: "",
-      dateOfBirth: "",
-      mobile: "",
-      address: "",
-      jobDesignation: "",
-      department: "",
+      firstName: "", lastName: "", dateOfBirth: "", mobile: "",
+      address: "", jobDesignation: "", department: "",
     },
-  })
+  });
 
-  const { formState: { errors, isValid }, watch, setValue } = form
-  const watchedValues = watch()
-
+  // ✨ ADDED `trigger` to implement step-wise validation
+  const { formState: { errors }, setValue, trigger } = form;
+  
   useEffect(() => {
-    // Load data from AuthContext only (no localStorage to prevent data leakage)
+    // This effect now correctly populates the form on initial load
+    // or when the user profile is externally updated (e.g., after login).
     if (userProfile) {
-      // Reset form with saved data from API
       Object.keys(userProfile).forEach(key => {
-        if (key in userProfile && key !== "documentHash" && key !== "userHash" && key !== "empId") {
-          setValue(key as keyof ProfileFormData, userProfile[key])
+        const profileKey = key as keyof ProfileFormData;
+        if (profileKey in form.getValues()) {
+          setValue(profileKey, userProfile[profileKey] as string);
         }
-      })
+      });
     }
 
-    // Load document history from API (not localStorage to prevent data leakage)
+    // Load document history independently
     const loadDocumentHistory = async () => {
       try {
-        const response = await apiService.getDocumentHistory()
-        if (response.success && response.data) {
-          console.log("Loading documents from API:", response.data)
-          setDocumentHistory(response.data)
-        } else {
-          console.log("No documents found or API error:", response.error)
-          setDocumentHistory([])
-        }
+        const response = await apiService.getDocumentHistory();
+        setDocumentHistory(response.success && response.data ? response.data : []);
       } catch (error) {
-        console.error("Error loading document history:", error)
-        setDocumentHistory([])
+        console.error("Error loading document history:", error);
+        setDocumentHistory([]);
       }
-    }
-    
-    // Only load documents if user is authenticated
+    };
     if (user) {
-      loadDocumentHistory()
+      loadDocumentHistory();
     }
-  }, [setValue, userProfile, user])
+  }, [user, userProfile, setValue]);
 
-  const onNext = () => {
+  // ✨ FIX: `onNext` now actively validates only the fields in the current step.
+  const onNext = async () => {
+    setMessage(null); // Clear previous messages
     if (step === "personal") {
-      // Validate personal fields before proceeding
-      const personalFields = ["firstName", "lastName", "dateOfBirth"]
-      const hasErrors = personalFields.some(field => errors[field as keyof ProfileFormData])
-      if (!hasErrors) setStep("contact")
+      const isValid = await trigger(["firstName", "lastName", "dateOfBirth"]);
+      if (isValid) setStep("contact");
     } else if (step === "contact") {
-      // Validate contact fields before proceeding
-      const contactFields = ["mobile", "address"]
-      const hasErrors = contactFields.some(field => errors[field as keyof ProfileFormData])
-      if (!hasErrors) setStep("employment")
+      const isValid = await trigger(["mobile", "address"]);
+      if (isValid) setStep("employment");
     }
-  }
+  };
+
+  // ✨ FIX: `onFile` now only updates the document list, preserving form state.
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const fileError = validateFile(file);
+    if (fileError) {
+      setMessage({ type: "error", text: fileError });
+      return;
+    }
+
+    setIsHashing(true);
+    setMessage(null);
+    try {
+      const response = await apiService.uploadDocument(file);
+      if (response.success && response.data) {
+        // Manually add the new document to the state instead of a full refresh
+        setDocumentHistory(prevDocs => [...prevDocs, response.data!]);
+        setMessage({ type: "success", text: "Document uploaded successfully!" });
+      } else {
+        throw new Error(response.error || "Failed to upload document");
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "An unknown error occurred.";
+      setMessage({ type: "error", text: errorMessage });
+    } finally {
+      setIsHashing(false);
+    }
+  };
 
   const onSave = async (data: ProfileFormData) => {
-    setIsSubmitting(true)
-    setMessage(null)
-    
+    setIsSubmitting(true);
+    setMessage(null);
+    setTxStatus("");
+
+    // Step 1: Save Profile to Database
     try {
-      // Update profile via API
-      const response = await apiService.updateProfile(data)
-      
-      console.log("Profile update response:", response)
-      
-      if (response.success && response.data) {
-        setMessage({ type: "success", text: "Profile updated successfully!" })
-        setTxStatus("Profile saved to database")
-        
-        // Try to refresh profile, but don't fail if it doesn't work
-        try {
-          await refreshProfile()
-        } catch (refreshError) {
-          console.warn("Profile refresh failed, but update was successful:", refreshError)
-        }
-        
-        // Navigate to profile view after successful save
-        setTimeout(() => {
-          router.push("/profile/info")
-        }, 1500) // Give user time to see success message
-      } else {
-        console.log("Profile update failed:", response)
-        throw new Error(response.error || "Failed to update profile")
-      }
+      const response = await apiService.updateProfile(data);
+      if (!response.success) throw new Error(response.error || "Failed to update profile.");
+      setMessage({ type: "success", text: "Profile saved! Preparing blockchain transaction..." });
+      await refreshProfile(); // Refresh profile AFTER saving
     } catch (error) {
-      console.error("Error saving profile:", error)
-      setMessage({ type: "error", text: "Failed to save profile. Please try again." })
-    } finally {
-      setIsSubmitting(false)
+      setMessage({ type: "error", text: error instanceof Error ? error.message : "Failed to save profile." });
+      setIsSubmitting(false);
+      return;
     }
-  }
 
-  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    
-    // Enhanced file validation
-    const fileError = validateFile(file)
-    if (fileError) {
-      setMessage({ type: "error", text: fileError })
-      return
-    }
-    
-    setSelectedFile(file)
-    setIsHashing(true)
-    setMessage(null)
-    
+    // Step 2: Register on Blockchain
     try {
-      // Upload document via API
-      const response = await apiService.uploadDocument(file)
+      if (!window.ethereum) throw new Error("MetaMask is not installed.");
       
-      if (response.success && response.data) {
-        const documentData = response.data
-        
-        // Check if this is an update or new upload
-        const isUpdate = documentHistory.some(doc => doc.docHash === documentData.docHash)
-        
-        // Update document history (no localStorage to prevent data leakage)
-        if (isUpdate) {
-          // Replace existing document in history
-          const updatedHistory = documentHistory.map(doc => 
-            doc.docHash === documentData.docHash ? documentData : doc
-          )
-          setDocumentHistory(updatedHistory)
-          setMessage({ type: "success", text: "Document updated successfully!" })
-        } else {
-          // Add new document to history
-          const newHistory = [...documentHistory, documentData]
-          setDocumentHistory(newHistory)
-          setMessage({ type: "success", text: "Document uploaded successfully!" })
-        }
-      } else {
-        throw new Error(response.error || "Failed to upload document")
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const network = await provider.getNetwork();
+
+      if (network.chainId !== BigInt(SEPOLIA_CHAIN_ID_NUM)) {
+        setTxStatus("Wrong network. Requesting switch to Sepolia...");
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }] });
       }
-    } catch (error) {
-      console.error("Error uploading file:", error)
+
+      setTxStatus("Please connect your wallet to proceed.");
+      const signer = await provider.getSigner();
       
-      // Handle specific error cases
-      let errorMessage = "Failed to upload file. Please try again."
-      
-      if (error instanceof Error) {
-        const errorText = error.message.toLowerCase()
-        
-        if (errorText.includes('already exists') && errorText.includes('another user')) {
-          errorMessage = "This document belongs to another user and cannot be uploaded."
-        } else if (errorText.includes('already exists') || errorText.includes('duplicate')) {
-          errorMessage = "This document has already been uploaded. Each document must be unique."
-        } else if (errorText.includes('file too large')) {
-          errorMessage = "File is too large. Please choose a smaller file."
-        } else if (errorText.includes('invalid file type')) {
-          errorMessage = "Invalid file type. Please upload a PDF file."
-        } else if (errorText.includes('validation failed')) {
-          errorMessage = "Document validation failed. Please check the file and try again."
-        }
+      const latestUserProfile = await apiService.getProfile(); // Get the very latest data
+      const latestDocs = await apiService.getDocumentHistory();
+      const docToRegister = latestDocs.data?.find(doc => doc.isOriginal) ?? latestDocs.data?.[latestDocs.data.length - 1];
+
+      if (!credentials?.empId || !latestUserProfile.data?.userHash || !credentials?.email || !docToRegister) {
+        throw new Error("Missing required data for transaction. Ensure profile is complete and a document is uploaded.");
       }
       
-      setMessage({ type: "error", text: errorMessage })
+      const contract = new ethers.Contract(contractAddress, contractABI, signer);
+      
+      setTxStatus("Please confirm the transaction in MetaMask...");
+      const tx = await contract.registerUser(
+        credentials.empId, latestUserProfile.data.userHash, credentials.email,
+        docToRegister.docHash, docToRegister.storagePath
+      );
+      
+      setTxStatus("Transaction sent! Waiting for confirmation...");
+      await tx.wait();
+
+      setMessage({ type: "success", text: "Profile and blockchain record saved successfully!" });
+      setTxStatus(`Success! View on Etherscan: ${tx.hash}`);
+
+      setTimeout(() => router.push("/profile/info"), 3000);
+
+    } catch (err: any) {
+      console.error("Blockchain Transaction Error:", err);
+      let errorMessage = err.reason || "An error occurred during the transaction.";
+      if (err.code === 4001) errorMessage = "Transaction rejected in MetaMask.";
+      setMessage({ type: "error", text: errorMessage });
+      setTxStatus("");
     } finally {
-      setIsHashing(false)
+      setIsSubmitting(false);
     }
-  }
+  };
 
-  const issueRecord = async () => {
-    // Get document hash from current user's profile (not localStorage)
-    const documentHash = userProfile?.docHash
-    const employeeId = credentials?.empId
-    
-    if (!documentHash || !employeeId) {
-      setMessage({ type: "error", text: "Upload a document and ensure you have valid credentials" })
-      return
-    }
-    
-    setTxStatus("Issuing record to blockchain...")
-    setMessage(null)
-    
-    setTimeout(() => {
-      const txHash = "0x" + Math.random().toString(16).slice(2).padEnd(64, "0").slice(0, 64)
-      setTxStatus(`Record issued successfully! Transaction: ${txHash}`)
-      setMessage({ type: "success", text: "Record issued to blockchain successfully!" })
-      
-      console.log(`Record issued: ${employeeId} -> ${documentHash}`)
-    }, 2000)
-  }
-
-  const getProgressPercentage = () => {
-    const steps = ["personal", "contact", "employment"]
-    const currentStepIndex = steps.indexOf(step)
-    return ((currentStepIndex + 1) / steps.length) * 100
-  }
+  const getProgressPercentage = () => ((["personal", "contact", "employment"].indexOf(step) + 1) / 3) * 100;
 
   return (
     <ProtectedRoute>
@@ -263,357 +232,148 @@ export default function ProfileEditPage() {
             <h1 className="text-3xl font-bold">Edit Profile</h1>
             <p className="text-gray-600 mt-2">Complete your profile information step by step</p>
           </div>
-
-          {/* Progress Bar */}
+          
           <div className="mb-8">
-            <div className="flex justify-between text-sm text-gray-600 mb-2">
-              <span>Step {step === "personal" ? 1 : step === "contact" ? 2 : 3} of 3</span>
-              <span>{Math.round(getProgressPercentage())}% Complete</span>
-            </div>
-            <Progress value={getProgressPercentage()} className="h-2" />
+             <Progress value={getProgressPercentage()} className="h-2" />
           </div>
 
-          {/* Step Navigation */}
           <div className="flex space-x-1 mb-8 border-b">
-            {[
-              { id: "personal", label: "Personal Info", icon: "👤" },
-              { id: "contact", label: "Contact Details", icon: "📞" },
-              { id: "employment", label: "Employment", icon: "💼" },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setStep(tab.id as any)}
-                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  step === tab.id
-                    ? "border-blue-500 text-blue-600"
-                    : "border-transparent text-gray-500 hover:text-gray-700"
-                }`}
-              >
-                <span className="mr-2">{tab.icon}</span>
-                {tab.label}
-              </button>
-            ))}
+             {[
+               { id: "personal", label: "Personal Info", icon: "👤" },
+               { id: "contact", label: "Contact Details", icon: "📞" },
+               { id: "employment", label: "Employment", icon: "💼" },
+             ].map((tab) => (
+               <button
+                 key={tab.id}
+                 onClick={() => setStep(tab.id as any)}
+                 className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                   step === tab.id
+                     ? "border-blue-500 text-blue-600"
+                     : "border-transparent text-gray-500 hover:text-gray-700"
+                 }`}
+               >
+                 <span className="mr-2">{tab.icon}</span>
+                 {tab.label}
+               </button>
+             ))}
           </div>
 
-          {/* Messages */}
           {message && (
-            <Alert className={`mb-6 ${message.type === "success" ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"}`}>
-              {message.type === "success" ? (
-                <CheckCircle className="h-4 w-4 text-green-600" />
-              ) : (
-                <AlertCircle className="h-4 w-4 text-red-600" />
-              )}
-              <AlertDescription className={message.type === "success" ? "text-green-800" : "text-red-800"}>
-                {message.text}
-              </AlertDescription>
+            <Alert className={`mb-6 ${message.type === "success" ? "border-green-200 bg-green-50 text-green-800" : "border-red-200 bg-red-50 text-red-800"}`}>
+              {message.type === "success" ? <CheckCircle className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
+              <AlertDescription>{message.text}</AlertDescription>
             </Alert>
           )}
 
           <form onSubmit={form.handleSubmit(onSave)}>
-            {/* Personal Information Step */}
             {step === "personal" && (
               <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center">
-                    <span className="mr-2">👤</span>
-                    Personal Information
-                  </CardTitle>
-                  <CardDescription>
-                    Tell us about yourself - this information will be used for verification
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                      <Label htmlFor="firstName">First Name *</Label>
-                      <Input
-                        id="firstName"
-                        {...form.register("firstName")}
-                        className={errors.firstName ? "border-red-500" : ""}
-                        placeholder="Enter your first name"
-                      />
-                      {errors.firstName && (
-                        <p className="text-red-500 text-sm mt-1">{errors.firstName.message}</p>
-                      )}
-                    </div>
-                    <div>
-                      <Label htmlFor="lastName">Last Name *</Label>
-                      <Input
-                        id="lastName"
-                        {...form.register("lastName")}
-                        className={errors.lastName ? "border-red-500" : ""}
-                        placeholder="Enter your last name"
-                      />
-                      {errors.lastName && (
-                        <p className="text-red-500 text-sm mt-1">{errors.lastName.message}</p>
-                      )}
-                    </div>
+                <CardHeader><CardTitle>Personal Information</CardTitle></CardHeader>
+                <CardContent className="space-y-4">
+                  <div>
+                    <Label htmlFor="firstName">First Name *</Label>
+                    <Input id="firstName" {...form.register("firstName")} />
+                    {errors.firstName && <p className="text-red-500 text-sm mt-1">{errors.firstName.message}</p>}
                   </div>
-
+                  <div>
+                    <Label htmlFor="lastName">Last Name *</Label>
+                    <Input id="lastName" {...form.register("lastName")} />
+                    {errors.lastName && <p className="text-red-500 text-sm mt-1">{errors.lastName.message}</p>}
+                  </div>
                   <div>
                     <Label htmlFor="dateOfBirth">Date of Birth *</Label>
-                    <Input
-                      id="dateOfBirth"
-                      type="date"
-                      {...form.register("dateOfBirth")}
-                      className={errors.dateOfBirth ? "border-red-500" : ""}
-                    />
-                    {errors.dateOfBirth && (
-                      <p className="text-red-500 text-sm mt-1">{errors.dateOfBirth.message}</p>
-                    )}
+                    <Input id="dateOfBirth" type="date" {...form.register("dateOfBirth")} />
+                    {errors.dateOfBirth && <p className="text-red-500 text-sm mt-1">{errors.dateOfBirth.message}</p>}
                   </div>
-
                   <div className="flex justify-end">
-                    <Button type="button" onClick={onNext} className="px-8">
-                      Next Step
-                    </Button>
+                    <Button type="button" onClick={onNext}>Next Step</Button>
                   </div>
                 </CardContent>
               </Card>
             )}
 
-            {/* Contact Information Step */}
             {step === "contact" && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center">
-                    <span className="mr-2">📞</span>
-                    Contact Details
-                  </CardTitle>
-                  <CardDescription>
-                    How can we reach you? This information is crucial for verification
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  <MobileInput
-                    id="mobile"
-                    label="Mobile Number *"
-                    {...form.register("mobile")}
-                    error={errors.mobile?.message}
-                    helperText="Enter your mobile number (10-15 digits). International format supported (+1234567890)"
-                    onValueChange={(value) => form.setValue("mobile", value)}
-                  />
-
-                  {/* Email Display (Read-only) */}
-                  {credentials && (
-                    <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                      <div className="flex items-center justify-between mb-2">
-                        <Label className="text-sm font-medium text-blue-800">Email Address</Label>
-                        <Badge variant="secondary" className="text-xs">Immutable</Badge>
-                      </div>
-                      <code className="text-sm font-mono text-blue-700 bg-white px-2 py-1 rounded">
-                        {credentials.email}
-                      </code>
-                      <p className="text-xs text-blue-600 mt-1">
-                        This email was set during registration and cannot be changed
-                      </p>
-                    </div>
-                  )}
-
-                  <div>
-                    <Label htmlFor="address">Address *</Label>
-                    <Input
-                      id="address"
-                      {...form.register("address")}
-                      className={errors.address ? "border-red-500" : ""}
-                      placeholder="Enter your full address"
-                    />
-                    {errors.address && (
-                      <p className="text-red-500 text-sm mt-1">{errors.address.message}</p>
-                    )}
-                  </div>
-
-                  <div className="flex justify-between">
-                    <Button type="button" variant="outline" onClick={() => setStep("personal")}>
-                      Previous
-                    </Button>
-                    <Button type="button" onClick={onNext} className="px-8">
-                      Next Step
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
+                 <Card>
+                    <CardHeader><CardTitle>Contact Details</CardTitle></CardHeader>
+                    <CardContent className="space-y-4">
+                        <MobileInput
+                          id="mobile"
+                          label="Mobile Number *"
+                          {...form.register("mobile")}
+                          error={errors.mobile?.message}
+                          onValueChange={(value) => form.setValue("mobile", value)}
+                        />
+                        <div>
+                            <Label htmlFor="address">Address *</Label>
+                            <Input id="address" {...form.register("address")} />
+                            {errors.address && <p className="text-red-500 text-sm mt-1">{errors.address.message}</p>}
+                        </div>
+                        <div className="flex justify-between">
+                            <Button type="button" variant="outline" onClick={() => setStep("personal")}>Previous</Button>
+                            <Button type="button" onClick={onNext}>Next Step</Button>
+                        </div>
+                    </CardContent>
+                 </Card>
             )}
 
-            {/* Employment Information Step */}
             {step === "employment" && (
               <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center">
-                    <span className="mr-2">💼</span>
-                    Employment Information
-                  </CardTitle>
-                  <CardDescription>
-                    Your employment details and document verification
-                  </CardDescription>
-                </CardHeader>
+                <CardHeader><CardTitle>Employment & Verification</CardTitle></CardHeader>
                 <CardContent className="space-y-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
                       <Label htmlFor="jobDesignation">Job Designation *</Label>
-                      <Input
-                        id="jobDesignation"
-                        {...form.register("jobDesignation")}
-                        className={errors.jobDesignation ? "border-red-500" : ""}
-                        placeholder="e.g., Software Engineer"
-                      />
-                      {errors.jobDesignation && (
-                        <p className="text-red-500 text-sm mt-1">{errors.jobDesignation.message}</p>
-                      )}
+                      <Input id="jobDesignation" {...form.register("jobDesignation")} />
+                      {errors.jobDesignation && <p className="text-red-500 text-sm mt-1">{errors.jobDesignation.message}</p>}
                     </div>
                     <div>
                       <Label htmlFor="department">Department *</Label>
-                      <Input
-                        id="department"
-                        {...form.register("department")}
-                        className={errors.department ? "border-red-500" : ""}
-                        placeholder="e.g., Engineering"
-                      />
-                      {errors.department && (
-                        <p className="text-red-500 text-sm mt-1">{errors.department.message}</p>
-                      )}
+                      <Input id="department" {...form.register("department")} />
+                      {errors.department && <p className="text-red-500 text-sm mt-1">{errors.department.message}</p>}
                     </div>
-                  </div>
-
-                  {/* Employee ID Display (Read-only) */}
-                  {credentials && (
-                    <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                      <div className="flex items-center justify-between mb-2">
-                        <Label className="text-sm font-medium text-blue-800">Employee ID</Label>
-                        <Badge variant="secondary" className="text-xs">Auto-generated</Badge>
-                      </div>
-                      <code className="text-sm font-mono text-blue-700 bg-white px-2 py-1 rounded">
-                        {credentials.empId}
-                      </code>
-                      <p className="text-xs text-blue-600 mt-1">
-                        This ID is automatically generated and cannot be changed
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Document Upload Section */}
-                  <div className="border-t pt-6">
-                    <h3 className="text-lg font-medium mb-4 flex items-center">
-                      <FileText className="mr-2" size={20} />
-                      Document Verification
-                    </h3>
-                    
-                    <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
-                      <Upload className="mx-auto h-12 w-12 text-gray-400 mb-4" />
-                      <div className="text-sm text-gray-600">
-                        <label htmlFor="file-upload" className="cursor-pointer">
-                          <span className="font-medium text-blue-600 hover:text-blue-500">
+                    {/* Document Upload Section */}
+                    <div className="border-t pt-6">
+                        <h3 className="text-lg font-medium mb-2">Document Verification</h3>
+                        <div className="border-2 border-dashed rounded-lg p-6 text-center">
+                          <label htmlFor="file-upload" className="cursor-pointer font-medium text-blue-600 hover:text-blue-500">
                             Upload a PDF document
-                          </span>
-                          <input
-                            id="file-upload"
-                            type="file"
-                            accept=".pdf"
-                            onChange={onFile}
-                            className="sr-only"
-                          />
-                        </label>
-                        <p className="mt-1">or drag and drop</p>
-                        <p className="text-xs text-gray-500 mt-2">PDF files only, max 10MB</p>
-                      </div>
+                            <input id="file-upload" type="file" accept=".pdf" onChange={onFile} className="sr-only" />
+                          </label>
+                          <p className="text-xs text-gray-500 mt-1">PDF only, max 10MB</p>
+                        </div>
+                        {isHashing && <p className="text-blue-600 text-sm mt-2">Hashing document...</p>}
+                        <div className="mt-4 space-y-2">
+                            {documentHistory.map((doc) => (
+                                <div key={doc.docHash} className="p-2 border rounded-md bg-gray-50 text-sm">
+                                    <p className="font-medium truncate">{doc.fileName}</p>
+                                    <p className="text-xs text-gray-500 font-mono break-all">{doc.docHash}</p>
+                                </div>
+                            ))}
+                        </div>
                     </div>
 
-                    {isHashing && (
-                      <div className="flex items-center justify-center mt-4 text-blue-600">
-                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
-                        Computing SHA-256 hash...
-                      </div>
-                    )}
-
-                    {/* Document History Display */}
-                    <div className="mt-6">
-                      <h4 className="text-md font-medium mb-3 text-gray-800">Uploaded Documents</h4>
-                      {documentHistory.length > 0 ? (
-                        <div className="space-y-3">
-                          {documentHistory.map((doc, index) => (
-                            <div key={doc.docHash || index} className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <FileText className="h-4 w-4 text-blue-600 mr-2" />
-                                  <div>
-                                    <p className="text-sm font-medium text-gray-800">{doc.fileName}</p>
-                                    <p className="text-xs text-gray-500">
-                                      {doc.fileSize ? `${(doc.fileSize / 1024).toFixed(1)} KB` : 'Unknown size'} • 
-                                      {doc.fileType?.toUpperCase() || 'PDF'}
-                                    </p>
-                                  </div>
-                                </div>
-                                <div className="flex items-center">
-                                  {doc.isOriginal && (
-                                    <Badge variant="default" className="text-xs mr-2">Original</Badge>
-                                  )}
-                                  <CheckCircle className="h-4 w-4 text-green-600" />
-                                </div>
-                              </div>
-                              <div className="mt-2">
-                                <p className="text-xs text-gray-600 font-mono break-all">
-                                  Hash: {doc.docHash}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg text-center">
-                          <FileText className="h-8 w-8 text-gray-400 mx-auto mb-2" />
-                          <p className="text-sm text-gray-600">No documents uploaded yet</p>
-                          <p className="text-xs text-gray-500 mt-1">Upload a PDF document above to get started</p>
-                        </div>
-                      )}
-                    </div>
-
-                    {userProfile?.docHash && (
-                      <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
-                        <div className="flex items-center mb-2">
-                          <Hash className="h-4 w-4 text-green-600 mr-2" />
-                          <span className="text-sm font-medium text-green-800">Document Hash Generated</span>
-                        </div>
-                        <code className="text-xs text-green-700 break-all block">
-                          {userProfile?.docHash}
-                        </code>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex justify-between">
-                    <Button type="button" variant="outline" onClick={() => setStep("contact")}>
-                      Previous
-                    </Button>
-                    <Button type="submit" disabled={isSubmitting} className="px-8">
-                      {isSubmitting ? "Saving..." : "Save Profile"}
-                    </Button>
-                  </div>
-
-                  {/* Blockchain Issue Section */}
-                  <div className="border-t pt-6">
-                    <h3 className="text-lg font-medium mb-4">Blockchain Record</h3>
-                    <p className="text-sm text-gray-600 mb-4">
-                      Issue your employment record to the blockchain for immutable verification
-                    </p>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={issueRecord}
-                      disabled={!credentials?.empId || !userProfile?.docHash || txStatus.includes("Issuing")}
-                      className="w-full"
-                    >
-                      {txStatus.includes("Issuing") ? "Issuing to Blockchain..." : "Issue Record to Blockchain"}
-                    </Button>
-
+                    {/* Transaction Status */}
                     {txStatus && (
-                      <Alert className={`mt-4 ${txStatus.includes("successfully") ? "border-green-200 bg-green-50" : "border-blue-200 bg-blue-50"}`}>
-                        <AlertCircle className="h-4 w-4 text-blue-600" />
-                        <AlertDescription className="text-blue-800">
-                          {txStatus}
+                      <Alert className="border-blue-200 bg-blue-50 text-blue-800">
+                        <AlertCircle className="h-4 w-4" />
+                        <AlertDescription className="break-all">
+                            {txStatus.startsWith('Success!') ? (
+                                <>
+                                    <strong>Success!</strong>
+                                    <a href={`https://sepolia.etherscan.io/tx/${txStatus.split(': ')[1]}`} target="_blank" rel="noopener noreferrer" className="font-mono text-xs block mt-1 underline">
+                                        View on Etherscan
+                                    </a>
+                                </>
+                            ) : txStatus}
                         </AlertDescription>
                       </Alert>
                     )}
-                  </div>
+                    
+                    <div className="flex justify-between border-t pt-6">
+                      <Button type="button" variant="outline" onClick={() => setStep("contact")}>Previous</Button>
+                      <Button type="submit" disabled={isSubmitting || documentHistory.length === 0}>
+                        {isSubmitting ? "Saving..." : "Save & Issue to Blockchain"}
+                      </Button>
+                    </div>
                 </CardContent>
               </Card>
             )}
